@@ -7,8 +7,8 @@ all: libfunction.so integrate
 libfunction.so: function.c
 	$(CC) $(CFLAGS) -shared -fPIC $< -o $@
 
-integrate: integrate.c
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+integrate: integrate.c 
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 asm: integrate.s
 integrate.s: integrate.c
