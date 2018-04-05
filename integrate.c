@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <poll.h>
 #include <wait.h>
@@ -18,17 +19,23 @@ struct CalcRequest
 	double left;
 	double right;
 	int nSegments;
+
+	struct timeval sent;
 };
 
 struct ChildAnswer
 {
 	double lowSum;
 	double highSum;
+
+	struct timeval sent;
+	struct timeval received;
+	struct timeval sentBack;
 };
 
+struct timeval start;
 
 #define POLL_TIMEOUT_MS 1000
-
 
 void exitError();
 void exitErrorMsg(char* description);
@@ -42,10 +49,14 @@ void childCalcSums(int rd, int wr);
 
 double parentIntegrate(int parentPipes[][2], int nChildren, double left, double right, double maxDeviation, double startFineness);
 
+void printTimes(struct ChildAnswer* answers, int nChildren);
+
 int main(int argc, char* argv[])
 {
 	double left, right, maxDeviation, startFineness;
 	int nChildren;
+		
+	gettimeofday(&start, NULL);
 
 	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation, &startFineness);	
 
@@ -54,18 +65,16 @@ int main(int argc, char* argv[])
 
 	double I = parentIntegrate(parentPipes, nChildren, left, right, maxDeviation, startFineness);
 
-	kill(0, SIGCHLD);
 	for (int i = 0; i < nChildren; i++)
 		wait(NULL);
+
+	struct rusage res;
+	getrusage(RUSAGE_CHILDREN, &res);
+	printf("%ld\n", res.ru_nvcsw);
 
 	printf("%lf\n", I);
 
 	return 0;
-}
-
-void die(int sig)
-{
-	exit(EXIT_SUCCESS);
 }
 
 void childCalcSums(int rd, int wr)
@@ -73,11 +82,12 @@ void childCalcSums(int rd, int wr)
 	struct CalcRequest rq;
 	struct ChildAnswer ans;
 
-	signal(SIGCHLD, die);
-
 	while (read(rd, &rq, sizeof(rq)))
 	{
+		ans.sent = rq.sent;
+		gettimeofday(&ans.received, NULL);
 		calcSums(func, rq.left, rq.right, &(ans.lowSum), &(ans.highSum), rq.nSegments);
+		gettimeofday(&ans.sentBack, NULL);
 
 		write(wr, &ans, sizeof(ans));
 	}
@@ -90,6 +100,8 @@ double parentIntegrate(int parentPipes[][2], int nChildren, double left, double 
 
 	struct CalcRequest rq;
 	struct ChildAnswer ans;
+
+	struct ChildAnswer answers[nChildren];
 
 	double partLen = (right - left) / nChildren;
 
@@ -107,6 +119,8 @@ double parentIntegrate(int parentPipes[][2], int nChildren, double left, double 
 		rq.left = left + partLen * i; 
 		rq.right = rq.left + partLen;
 		rq.nSegments = nSegments;
+
+		gettimeofday(&rq.sent, NULL);
 
 		write(parentPipes[i][1], &rq, sizeof(rq));
 	}
@@ -132,9 +146,13 @@ double parentIntegrate(int parentPipes[][2], int nChildren, double left, double 
 					S += ans.highSum;
 					done++;
 
+					answers[i] = ans;
+
 					rq.left = left + partLen * i; 
 					rq.right = rq.left + partLen;
 					rq.nSegments = nSegments * 2;
+
+					gettimeofday(&rq.sent, NULL);
 
 					write(parentPipes[i][1], &rq, sizeof(rq));
 				}
@@ -143,6 +161,8 @@ double parentIntegrate(int parentPipes[][2], int nChildren, double left, double 
 
 		for (int i = 0; i < nChildren; i++)
 			fds[i].events |= POLLIN;
+
+		//printTimes(answers, nChildren);
 
 		nSegments *= 2;
 	}
@@ -155,41 +175,6 @@ double parentIntegrate(int parentPipes[][2], int nChildren, double left, double 
 	}
 
 	return (S + s) / 2;
-}
-
-void createChildren(int parentPipes[][2], int nChildren)
-{
-	int childPipes[2];
-	int pipefd[2];
-
-	for (int i = 0; i < nChildren; i++)
-	{
-		pipe(pipefd);
-		parentPipes[i][1] = pipefd[1];
-		childPipes[0] = pipefd[0];
-		
-		pipe(pipefd);
-		parentPipes[i][0] = pipefd[0];
-		childPipes[1] = pipefd[1];
-
-		if (fork() == 0)
-		{
-			for (; i >= 0; i--) {
-				close(parentPipes[i][0]);
-				close(parentPipes[i][1]);
-			}
-			childCalcSums(childPipes[0], childPipes[1]);
-			exit(EXIT_SUCCESS);
-		}
-		
-		if (errno != 0)
-		{
-			kill(0, SIGTERM);
-			exitErrorMsg("Failed to create new child process.\n");
-		}
-		close(childPipes[0]);
-		close(childPipes[1]);
-	}
 }
 
 void calcSums(double (*func)(double x), double left, double right, double* lowSum, double* highSum, int nSegments)
@@ -215,6 +200,96 @@ void calcSums(double (*func)(double x), double left, double right, double* lowSu
 
 	*lowSum = s;
 	*highSum = S;
+}
+
+void die(int sig)
+{
+	if (sig == SIGCHLD)
+		exit(EXIT_SUCCESS);
+}
+
+void createChildren(int parentPipes[][2], int nChildren)
+{
+	int childPipes[2];
+	int pipefd[2];
+
+	signal(SIGCHLD, die);
+	for (int i = 0; i < nChildren; i++)
+	{
+		pipe(pipefd);
+		parentPipes[i][1] = pipefd[1];
+		childPipes[0] = pipefd[0];
+		
+		pipe(pipefd);
+		parentPipes[i][0] = pipefd[0];
+		childPipes[1] = pipefd[1];
+
+		if (fork() == 0)
+		{
+			for (; i >= 0; i--) {
+				close(parentPipes[i][0]);
+				close(parentPipes[i][1]);
+			}
+
+			childCalcSums(childPipes[0], childPipes[1]);
+			exit(EXIT_SUCCESS);
+		}
+		
+		if (errno != 0)
+		{
+			kill(0, SIGTERM);
+			exitErrorMsg("Failed to create new child process.\n");
+		}
+		close(childPipes[0]);
+		close(childPipes[1]);
+	}
+	signal(SIGCHLD, SIG_DFL);
+}
+
+long getMillis(struct timeval tv)
+{
+	return (tv.tv_sec % 10000) * 1000 + tv.tv_usec / 1000;
+}
+
+void printTimes(struct ChildAnswer* answers, int nChildren)
+{
+	long minTime = getMillis(answers[0].sent);
+	long maxTime = getMillis(answers[0].sentBack);
+
+	for (int i = 0; i < nChildren; i++)
+	{
+		if (getMillis(answers[i].sent) < minTime)
+			minTime = getMillis(answers[i].sent);
+
+		if (getMillis(answers[i].sentBack) > maxTime)
+			maxTime = getMillis(answers[i].sentBack);
+	}
+
+	int dots = 100;
+	double millisPerDot = (maxTime - minTime) / (double)dots;
+	double startTime = minTime;
+
+	printf("%4ld", minTime - getMillis(start));
+	for (int i = 8; i < dots; i++)
+		printf("-");
+	printf("%4ld\n", maxTime - getMillis(start));
+
+	for (int i = 0; i < nChildren; i++)
+	{
+		double t = startTime;
+		for (; t < getMillis(answers[i].sent); t += millisPerDot)
+			printf(" ");
+
+		printf("\033[91m");
+		for (; t < getMillis(answers[i].received); t += millisPerDot)
+			printf("*");
+
+		printf("\033[92m");
+		for (; t < getMillis(answers[i].sentBack); t += millisPerDot)
+			printf("*");
+
+		printf("\033[0m\n");
+	}
 }
 
 void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildren, double* maxDeviation, double* startFineness)

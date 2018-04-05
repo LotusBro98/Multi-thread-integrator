@@ -5,7 +5,7 @@ LDFLAGS=-L. -Wl,-rpath,. -lfunction -lm
 all: libfunction.so integrate
 
 libfunction.so: function.c
-	$(CC) $(CFLAGS) -shared -fPIC $< -o $@
+	$(CC) $(CFLAGS) -shared -fPIC $< -o $@ -lm
 
 integrate: integrate.c 
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
