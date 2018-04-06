@@ -33,7 +33,20 @@ struct ChildAnswer
 	struct timeval sentBack;
 };
 
+struct UnstudiedSegment
+{
+	double left;
+	double right;
+	double lowSum;
+	double highSum;
+	struct UnstudiedSegment* next;
+	struct UnstudiedSegment* prev;
+};
+
 struct timeval start;
+
+#define true 1
+#define false 0
 
 #define POLL_TIMEOUT_MS 1000
 
@@ -50,6 +63,15 @@ void childCalcSums(int rd, int wr);
 double parentIntegrate(int parentPipes[][2], int nChildren, double left, double right, double maxDeviation, double startFineness);
 
 void printTimes(struct ChildAnswer* answers, int nChildren);
+
+void split(struct UnstudiedSegment* seg);
+void splitNParts(struct UnstudiedSegment* seg, int n);
+double removeSeg(struct UnstudiedSegment* *seg);
+struct UnstudiedSegment* getSeg(struct UnstudiedSegment* head, int index);
+struct UnstudiedSegment* initList(double left, double right, int nChildren);
+void printList(struct UnstudiedSegment* list);
+int listLen(struct UnstudiedSegment* list);
+
 
 int main(int argc, char* argv[])
 {
@@ -93,80 +115,105 @@ void childCalcSums(int rd, int wr)
 	}
 }
 
-double parentIntegrate(int parentPipes[][2], int nChildren, double left, double right, double maxDeviation, double startFineness)
+void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq)
 {
-	double s;
-	double S;
+	rq->left = seg->left;
+	rq->right = seg->right;
+	rq->nSegments = 128;
+	gettimeofday(&(rq->sent), NULL);
+}
 
-	struct CalcRequest rq;
+void fillSegmentData(struct UnstudiedSegment* seg, struct ChildAnswer* ans)
+{
+	seg->lowSum = ans->lowSum;
+	seg->highSum = ans->highSum;
+}
+
+void collectData(struct pollfd* fds, int nChildren, struct UnstudiedSegment* segList)
+{
 	struct ChildAnswer ans;
 
-	struct ChildAnswer answers[nChildren];
+	int done = 0;
+	while (done < nChildren)
+	{
+		poll(fds, nChildren, POLL_TIMEOUT_MS);
 
-	double partLen = (right - left) / nChildren;
+		for (int i = 0; i < nChildren; i++)
+			if (fds[i].revents & POLLIN)
+			{
+				read(fds[i].fd, &ans, sizeof(ans));
+				fillSegmentData(getSeg(segList, i), &ans);
+				
+				fds[i].events &= ~POLLIN;
+				done++;
+			}
+	}
+}
 
-	int nSegments = partLen / startFineness + 1;
+double pickGoodIntegrals(struct UnstudiedSegment** segList, int nChildren, double maxDeviation, double left, double right)
+{
+	double I = 0;
+	double dens = maxDeviation / (right - left);
 
-	struct timeval start;
-	gettimeofday(&start, NULL);
+	struct UnstudiedSegment* p = *segList;
 
-	struct pollfd fds[nChildren];
+	printList(*segList);
 	for (int i = 0; i < nChildren; i++)
 	{
-		fds[i].fd = parentPipes[i][0];
-		fds[i].events = POLLIN;
-
-		rq.left = left + partLen * i; 
-		rq.right = rq.left + partLen;
-		rq.nSegments = nSegments;
-
-		gettimeofday(&rq.sent, NULL);
-
-		write(parentPipes[i][1], &rq, sizeof(rq));
+		printf("%le %le\n", p->highSum - p->lowSum, dens * (p->right - p->left));
+		if ((p->highSum - p->lowSum) <= dens * (p->right - p->left))
+		{
+			if (p == *segList)
+			{
+				I += removeSeg(&p);
+				*segList = p;
+			}
+			else
+				I += removeSeg(&p);
+		}
+		else
+		{
+			split(p);
+			p = (p->next)->next;
+		}
 	}
 
+	if (*segList != NULL && listLen(*segList) < nChildren)
+		splitNParts(*segList, nChildren - listLen(*segList) + 1);
+
+	return I;
+}
+
+void sendRequests(struct pollfd* fds, int pipes[][2], int nChildren, struct UnstudiedSegment* segList)
+{
+	struct CalcRequest rq;
+	struct UnstudiedSegment* p = segList;
+
+	for (int i = 0; i < nChildren; i++)
+	{
+		fds[i].fd = pipes[i][0];
+		fds[i].events = POLLIN;
+		makeRequest(p, &rq);
+		write(pipes[i][1], &rq, sizeof(rq));
+		p = p->next;
+	}
+}
+
+double parentIntegrate(int parentPipes[][2], int nChildren, double left, double right, double maxDeviation, double startFineness)
+{
+	double I = 0;
+
+	struct pollfd fds[nChildren];
+
+	struct UnstudiedSegment* segList = initList(left, right, nChildren);
 
 	do
 	{
-		S = s = 0;
-
-		int done = 0;
-		while (done < nChildren)
-		{
-			poll(fds, nChildren, POLL_TIMEOUT_MS);
-
-			for (int i = 0; i < nChildren; i++)
-			{
-				if (fds[i].revents & POLLIN)
-				{
-					read(parentPipes[i][0], &ans, sizeof(ans));
-					fds[i].events &= ~POLLIN;
-
-					s += ans.lowSum;
-					S += ans.highSum;
-					done++;
-
-					answers[i] = ans;
-
-					rq.left = left + partLen * i; 
-					rq.right = rq.left + partLen;
-					rq.nSegments = nSegments * 2;
-
-					gettimeofday(&rq.sent, NULL);
-
-					write(parentPipes[i][1], &rq, sizeof(rq));
-				}
-			}
-		}
-
-		for (int i = 0; i < nChildren; i++)
-			fds[i].events |= POLLIN;
-
-		//printTimes(answers, nChildren);
-
-		nSegments *= 2;
+		sendRequests(fds, parentPipes, nChildren, segList);
+		collectData(fds, nChildren, segList);
+		I += pickGoodIntegrals(&segList, nChildren, maxDeviation, left, right);
 	}
-	while (S - s > maxDeviation);
+	while (segList != NULL);
 
 	for (int i = 0; i < nChildren; i++)
 	{
@@ -174,20 +221,22 @@ double parentIntegrate(int parentPipes[][2], int nChildren, double left, double 
 		close(parentPipes[i][1]);
 	}
 
-	return (S + s) / 2;
+	return I;
 }
 
 void calcSums(double (*func)(double x), double left, double right, double* lowSum, double* highSum, int nSegments)
 {
-	double x = left, shift = (right - left) / nSegments; 
+	double shift = (right - left) / nSegments; 
+	double fleft = func(left), fright = func(right);
+	double f1, f2 = func(left); 
 	double s = 0, S = 0;	
-	double f1, f2 = func(x); 
+	double x;
 
-	right -= shift;
-	while (x <= right) 
+	for (int i = 1; i <= nSegments; i++)
 	{
 		f1 = f2;
-		f2 = func(x += shift);
+		x = left + i * (right - left) / nSegments;
+		f2 = func(x) - fleft - i * (fright - fleft) / nSegments; 
 		
 		if (f1 < f2) {
 			s += f1 * shift;
@@ -197,6 +246,9 @@ void calcSums(double (*func)(double x), double left, double right, double* lowSu
 			S += f1 * shift;
 		}
 	}
+
+	s += (fright + fleft) / 2 * (right - left);
+	S += (fright + fleft) / 2 * (right - left);
 
 	*lowSum = s;
 	*highSum = S;
@@ -244,6 +296,138 @@ void createChildren(int parentPipes[][2], int nChildren)
 		close(childPipes[1]);
 	}
 	signal(SIGCHLD, SIG_DFL);
+}
+
+struct UnstudiedSegment* initList(double left, double right, int nChildren)
+{
+	struct UnstudiedSegment* list = malloc(sizeof(struct UnstudiedSegment));
+
+	list->left = left;
+	list->right = right;
+	list->next = NULL;
+	list->prev = NULL;
+
+	splitNParts(list, nChildren);
+
+	return list;
+}
+
+void splitNParts(struct UnstudiedSegment* seg, int n)
+{
+	if (seg == NULL)
+		return;
+
+	double left = seg->left;
+	double right = seg->right;
+
+	struct UnstudiedSegment* p = seg;
+	p->right = left + (right - left) / n;
+
+	for (int i = 2; i <= n; i++)	
+	{
+		struct UnstudiedSegment* newSeg = malloc(sizeof(struct UnstudiedSegment));
+		double div = left + i * (right - left) / n;
+		newSeg->left = p->right;
+		newSeg->right = div;
+
+		if (p->next != NULL)
+			p->next->prev = newSeg;
+		newSeg->prev = p;
+
+		newSeg->next = p->next;
+		p->next = newSeg;
+	}
+}
+
+void split(struct UnstudiedSegment* seg)
+{
+	if (seg == NULL)
+		return;
+
+	struct UnstudiedSegment* newSeg = malloc(sizeof(struct UnstudiedSegment));
+	if (errno != 0)
+	{
+		fprintf(stderr, "Failed to allocate memory for another segment in segList.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	double center = (seg->right + seg->left) / 2;
+	newSeg->left = center;
+	newSeg->right = seg->right;
+	seg->right = center;
+
+	if (seg->next != NULL)
+		seg->next->prev = newSeg;
+	newSeg->prev = seg;
+
+	newSeg->next = seg->next;
+	seg->next = newSeg;
+}
+
+double removeSeg(struct UnstudiedSegment* *seg)
+{
+	if (*seg == NULL)
+		return 0;
+	
+	double I = ((*seg)->highSum + (*seg)->lowSum) / 2;
+
+	if ((*seg)->next != NULL)
+		(*seg)->next->prev = (*seg)->prev;
+
+	if ((*seg)->prev != NULL)
+		(*seg)->prev->next = (*seg)->next;
+
+	struct UnstudiedSegment* old = *seg;
+	*seg = old->next;
+	free(old);
+
+	return I;
+}
+
+int listLen(struct UnstudiedSegment* list)
+{
+	int i = 0;
+	while (list)
+	{
+		list = list->next;
+		i++;
+	}
+	return i;
+}
+
+struct UnstudiedSegment* getSeg(struct UnstudiedSegment* head, int index)
+{
+	if (head == NULL)
+		return NULL;
+
+	struct UnstudiedSegment* p = head;
+	for (int i = 0; i < index; i++)
+	{
+		p = p->next;
+		if (p == NULL)
+			return NULL;
+	}
+
+	return p;
+}
+
+void printList(struct UnstudiedSegment* list)
+{
+	if (list == NULL)
+	{
+		printf("NULL\n");
+		return;
+	}
+
+	while (list)
+	{
+		printf("[%2.2le (%2.2le %2.2le) %2.2le]", list->left, list->lowSum, list->highSum, list->right);
+		if (list->next)
+			printf(" -> ");
+		list = list->next;
+	}
+
+	printf("\n");
 }
 
 long getMillis(struct timeval tv)
