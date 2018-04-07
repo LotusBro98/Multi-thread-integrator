@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <wait.h>
 #include <sched.h>
+#include <math.h>
 
 extern double func(double x);
 
@@ -51,18 +52,20 @@ struct timeval start;
 #define false 0
 
 #define POLL_TIMEOUT_MS 1000
+#define SEGMENTS_PER_PROCESS 0x1000
+#define PRINT_PERIOD_MS 100
 
 void exitError();
 void exitErrorMsg(char* description);
 
-void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildren, double* maxDeviation, double* startFineness);
+void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildren, double* maxDeviation);
 
 void createChildren(int parentPipes[][2], int nChildren);
 
 void calcSums(double (*func)(double x), double left, double right, double* s, double* S, int nSegments);
 void childCalcSums(int rd, int wr);
 
-double parentIntegrate(int parentPipes[][2], int nChildren, double left, double right, double maxDeviation, double startFineness);
+double parentIntegrate(int parentPipes[][2], int nChildren, double left, double right, double maxDeviation);
 
 void printTimes(struct ChildAnswer* answers, int nChildren);
 void printProgress(struct UnstudiedSegment* segList, double left, double right, double I);
@@ -75,37 +78,59 @@ struct UnstudiedSegment* initList(double left, double right, int nChildren);
 void printList(struct UnstudiedSegment* list);
 int listLen(struct UnstudiedSegment* list);
 
+void printAnswer(double left, double right, double maxDeviation, double I)
+{
+	fprintf(stderr,
+		"\n"\
+		"%7.3f\n"\
+		"    /\n"\
+		"    | f(x) dx = ",
+		right
+	);
+	fflush(stderr);
+
+	char fmt[8];
+	sprintf(fmt, "%%.%dlf", (int)(-log10(maxDeviation) - 0.001) + 1);
+
+	printf(fmt, I);
+	fflush(stdout);
+
+	fprintf(stderr, " +/- %lg\n"\
+		"    /\n"\
+		"%7.3f\n"\
+		"\n",
+		maxDeviation, left
+	);
+}
 
 int main(int argc, char* argv[])
 {
-	double left, right, maxDeviation, startFineness;
+	double left, right, maxDeviation;
 	int nChildren;
 		
 	gettimeofday(&start, NULL);
 
-	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation, &startFineness);	
+	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation);	
 
 	int parentPipes[nChildren][2];
 	createChildren(parentPipes, nChildren);
 
-	double I = parentIntegrate(parentPipes, nChildren, left, right, maxDeviation, startFineness);
+	double I = parentIntegrate(parentPipes, nChildren, left, right, maxDeviation);
 
 	for (int i = 0; i < nChildren; i++)
 		wait(NULL);
 
-	printf("%.20f\n", I);
+//	printf("%.20f\n", I);
+	printAnswer(left, right, maxDeviation, I);
 
 	return 0;
 }
 
-void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child, int nChildren)
+void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child)
 {
 	rq->left = seg->left;
 	rq->right = seg->right;
-	rq->nSegments = 0x1000;
-//	rq->nSegments = 0x1000 / nChildren;
-//	if (rq->nSegments < 0x10)
-//		rq->nSegments = 0x10;
+	rq->nSegments = SEGMENTS_PER_PROCESS;
 
 	gettimeofday(&(rq->sent), NULL);
 
@@ -117,7 +142,6 @@ int handleSegmentData(
 	struct ChildAnswer* ans, 
 	struct CalcRequest* rq,
 	int child,
-	int nChildren,
 	double* I, 
 	double dens)
 {
@@ -135,18 +159,18 @@ int handleSegmentData(
 		if (seg == NULL)
 			return false;
 
-		makeRequest(seg, rq, child, nChildren);
+		makeRequest(seg, rq, child);
 		return true;
 	}
 	else
 	{
 		split(seg);
-		makeRequest(seg, rq, child, nChildren);
+		makeRequest(seg, rq, child);
 		return true;
 	}
 }
 
-void sendRequests(struct pollfd* fds, int pipes[][2], int nChildren, struct UnstudiedSegment* segList)
+void sendRequests(struct pollfd* fds, int pipes[][2], struct ChildAnswer* answers, int nChildren, struct UnstudiedSegment* segList)
 {
 	struct CalcRequest rq;
 	struct UnstudiedSegment* seg;;
@@ -163,16 +187,20 @@ void sendRequests(struct pollfd* fds, int pipes[][2], int nChildren, struct Unst
 			if (seg == NULL)
 				break;
 
-			makeRequest(seg, &rq, i, nChildren);
+			makeRequest(seg, &rq, i);
 			write(pipes[i][1], &rq, sizeof(rq));
 		}
+
+		answers[i].sent = start;
+		answers[i].received = start;
+		answers[i].sentBack = start;
 		
 		fds[i].fd = pipes[i][0];
 		fds[i].events = POLLIN;
 	}
 }
 
-double parentIntegrate(int pipes[][2], int nChildren, double left, double right, double maxDeviation, double startFineness)
+double parentIntegrate(int pipes[][2], int nChildren, double left, double right, double maxDeviation)
 {
 	double dens = maxDeviation / (right - left);
 	struct ChildAnswer answers[nChildren];
@@ -181,8 +209,8 @@ double parentIntegrate(int pipes[][2], int nChildren, double left, double right,
 	struct UnstudiedSegment* segList = initList(left, right, nChildren);
 	double I = 0;
 
-	sendRequests(fds, pipes, nChildren, segList);
-	
+	sendRequests(fds, pipes, answers, nChildren, segList);
+
 	while (segList != NULL)
 	{
 		poll(fds, nChildren, POLL_TIMEOUT_MS);
@@ -193,7 +221,7 @@ double parentIntegrate(int pipes[][2], int nChildren, double left, double right,
 				read(fds[i].fd, &(answers[i]), sizeof(answers[i]));
 				
 
-				if(handleSegmentData(&segList, &(answers[i]), &rq, i, nChildren, &I, dens))
+				if(handleSegmentData(&segList, &(answers[i]), &rq, i, &I, dens))
 					write(pipes[i][1], &rq, sizeof(rq));
 			}
 
@@ -439,7 +467,13 @@ long getMillis(struct timeval tv)
 	return (tv.tv_sec % 10000) * 1000 + tv.tv_usec / 1000;
 }
 
+long getMicros(struct timeval tv)
+{
+	return (tv.tv_sec % 100) * 1000000 + tv.tv_usec;
+}
+
 struct timeval lastPrint;
+int firstTime = true;
 void printProgress(struct UnstudiedSegment* segList, double left, double right, double I)
 {
 	int dots = 100;
@@ -450,13 +484,18 @@ void printProgress(struct UnstudiedSegment* segList, double left, double right, 
 	struct timeval tv;
 	gettimeofday(&tv, NULL);
 
-	if (p != NULL && getMillis(tv) - getMillis(lastPrint) < 50)
+	if (p != NULL && getMillis(tv) - getMillis(lastPrint) < PRINT_PERIOD_MS)
 		return;
 	else
 		lastPrint = tv;
 
-	printf("\033c");
-	fflush(stdout);
+	if (firstTime)
+		firstTime = false;
+	else
+	{
+		fprintf(stderr, "\033M");
+		fflush(stdout);
+	}
 
 	while (x < right)
 	{
@@ -471,55 +510,60 @@ void printProgress(struct UnstudiedSegment* segList, double left, double right, 
 		x += unitsPerDot;
 	}
 
-	printf("  %.18lf\n", I);
+	fprintf(stderr, "  %.18lf\n", I);
 }
 
 void printTimes(struct ChildAnswer* answers, int nChildren)
 {
-	long minTime = getMillis(answers[0].sent);
-	long maxTime = getMillis(answers[0].sentBack);
+	long minTime = getMicros(answers[0].sent);
+	long maxTime = getMicros(answers[0].sentBack);
 
 	for (int i = 0; i < nChildren; i++)
 	{
-		if (getMillis(answers[i].sent) < minTime)
-			minTime = getMillis(answers[i].sent);
+		if (getMicros(answers[i].sent) < minTime)
+			minTime = getMicros(answers[i].sent);
 
-		if (getMillis(answers[i].sentBack) > maxTime)
-			maxTime = getMillis(answers[i].sentBack);
+		if (getMicros(answers[i].sentBack) > maxTime)
+			maxTime = getMicros(answers[i].sentBack);
 	}
 
 	int dots = 100;
-	double millisPerDot = (maxTime - minTime) / (double)dots;
+	double microsPerDot = (maxTime - minTime) / (double)dots;
 	double startTime = minTime;
 
-	printf("%4ld", minTime - getMillis(start));
+	printf("%4ld", minTime - getMicros(start));
 	for (int i = 8; i < dots; i++)
 		printf("-");
-	printf("%4ld\n", maxTime - getMillis(start));
+	printf("%4ld\n", maxTime - getMicros(start));
+
+	printf("\n");
 
 	for (int i = 0; i < nChildren; i++)
 	{
 		double t = startTime;
-		for (; t < getMillis(answers[i].sent); t += millisPerDot)
+		for (; t < getMicros(answers[i].sent); t += microsPerDot)
 			printf(" ");
 
 		printf("\033[91m");
-		for (; t < getMillis(answers[i].received); t += millisPerDot)
+		for (; t < getMicros(answers[i].received); t += microsPerDot)
 			printf("*");
 
 		printf("\033[92m");
-		for (; t < getMillis(answers[i].sentBack); t += millisPerDot)
+		for (; t < getMicros(answers[i].sentBack); t += microsPerDot)
 			printf("*");
+
+		for (t -= microsPerDot; t < maxTime; t += microsPerDot)
+			printf(" ");
 
 		printf("\033[0m\n");
 	}
 }
 
-void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildren, double* maxDeviation, double* startFineness)
+void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildren, double* maxDeviation)
 {
 	if (argc == 1)
 		exitErrorMsg(
-"Usage: ./integrate <from> <to> [nChildren] [maxDeviation] [startFineness]\n\n\
+"Usage: ./integrate <from> <to> [nChildren] [maxDeviation]\n\n\
 Calculates definite integral of function 'func', specified in 'libfunction.so'.\n\
 'libfunction.so' is compiled from 'function.c'. To change the function, edit 'function.c', then run 'make'.\n\
 All parameters except <nChildren> are of type double.\n"
@@ -551,17 +595,6 @@ All parameters except <nChildren> are of type double.\n"
 			exitErrorMsg("Failed to convert 4th argument to double.\n");
 	}
 		else *maxDeviation = 0.000001;
-
-	if (argc >= 6)
-	{
-		*startFineness = strtod(argv[5], &endptr);
-		if (errno != 0 || (unsigned)(endptr - argv[5]) != strlen(argv[5]))
-			exitErrorMsg("Failed to convert 5th argument to double.\n");
-	}
-		else *startFineness = 0.1;
-
-	
-
 }
 
 void exitError()
