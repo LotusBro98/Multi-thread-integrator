@@ -1,6 +1,8 @@
 #ifndef LIST_H
 #define LIST_H
 
+#include "general.h"
+
 struct UnstudiedSegment
 {
 	double left;
@@ -20,10 +22,11 @@ struct SegmentList
 };
 
 void split(struct UnstudiedSegment* seg);
+//void redoubleViligance(struct UnstudiedSegment* seg);
 void splitNParts(struct UnstudiedSegment* seg, int n);
 double removeSeg(struct UnstudiedSegment* seg);
 struct UnstudiedSegment* getSeg(struct SegmentList segList, int child);
-struct SegmentList initList(double left, double right, int nChildren);
+struct SegmentList initList(double left, double right);
 void printList(struct SegmentList list);
 int listLen(struct SegmentList list);
 int isEmpty(struct SegmentList list);

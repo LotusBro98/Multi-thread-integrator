@@ -17,4 +17,6 @@ void printAnswer(double left, double right, double maxDeviation, double I);
 
 void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildren, double* maxDeviation);
 
+long getMicros(struct timeval tv);
+
 #endif

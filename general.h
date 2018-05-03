@@ -7,7 +7,6 @@ struct CalcRequest
 {
 	double left;
 	double right;
-	int nSegments;
 	double dens;
 
 	struct timeval sent;
@@ -25,5 +24,11 @@ struct ChildAnswer
 
 #define true 1
 #define false 0
+
+/*
+#define MAX_SEGMENTS_PER_PROCESS 0x10000000
+#define START_UNSTUDIED_SEGMENTS 0x100
+#define START_LITTLE_SEGMENTS 0x10
+*/
 
 #endif

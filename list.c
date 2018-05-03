@@ -5,7 +5,7 @@
 
 #include "list.h"
 
-struct SegmentList initList(double left, double right, int nChildren)
+struct SegmentList initList(double left, double right)
 {
 	struct UnstudiedSegment* head = malloc(sizeof(struct UnstudiedSegment));
 	struct UnstudiedSegment* first = malloc(sizeof(struct UnstudiedSegment));
@@ -14,6 +14,7 @@ struct SegmentList initList(double left, double right, int nChildren)
 	first->right = right;
 	first->next = head;
 	first->prev = head;
+	first->child = -1;
 
 	head->next = first;
 	head->prev = first;
@@ -21,8 +22,6 @@ struct SegmentList initList(double left, double right, int nChildren)
 	struct SegmentList list = {.head = head};
 	list.startLen = right - left;
 
-	splitNParts(first, nChildren);
-	
 	return list;
 }
 
@@ -131,12 +130,34 @@ void split(struct UnstudiedSegment* seg)
 	seg->next = newSeg;
 }
 
+/*
+void redoubleViligance(struct UnstudiedSegment* seg)
+{
+	if (seg->nSegments < MAX_SEGMENTS_PER_PROCESS)
+	{
+		seg->child = -1;
+		seg->nSegments *= 2;
+		if (seg->nSegments > MAX_SEGMENTS_PER_PROCESS)
+			seg->nSegments = MAX_SEGMENTS_PER_PROCESS;
+	}
+	else
+	{
+		seg->nSegments /= 2;
+		if (seg->nSegments < START_LITTLE_SEGMENTS)
+			seg->nSegments = START_LITTLE_SEGMENTS;
+
+		split(seg);
+	}
+}
+*/
+
 double removeSeg(struct UnstudiedSegment* seg)
 {
 	if (seg == NULL || seg->next == seg)
 		return 0;
 	
-	double DI = seg->S * (seg->right - seg->left);
+	//double DI = seg->S * (seg->right - seg->left);
+	double DI = seg->S;
 
 	seg->next->prev = seg->prev;
 	seg->prev->next = seg->next;

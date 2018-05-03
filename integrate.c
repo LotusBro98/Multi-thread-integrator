@@ -19,7 +19,7 @@
 
 extern double func(double x);
 
-#define SEGMENTS_PER_PROCESS 0x10000
+//#define SEGMENTS_PER_PROCESS 0x1000
 
 double startSegLen;
 
@@ -34,7 +34,7 @@ struct Connection
 
 void createChildren(struct Connection* *con, int nChildren);
 
-void calcSums(double (*func)(double x), double left, double right, double* s, double* S, int nSegments, double dens);
+void calcSums(double (*func)(double x), double left, double right, double* s, double* S, double dens);
 void childCalcSums(int rd, int wr);
 
 double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation);
@@ -83,8 +83,9 @@ void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child
 	rq->right = seg->right;
 	rq->dens = dens;
 
+//	rq->nSegments = seg->nSegments;
 //	rq->nSegments = SEGMENTS_PER_PROCESS;
-	rq->nSegments = getNSegments(rq->right - rq->left, startSegLen);
+//	rq->nSegments = getNSegments(rq->right - rq->left, startSegLen);
 
 	gettimeofday(&(rq->sent), NULL);
 
@@ -116,6 +117,7 @@ int handleSegmentData(
 	else
 	{
 		split(seg);
+//		redoubleViligance(seg);
 
 		seg = getSeg(segList, -1);
 		makeRequest(seg, rq, child, dens);
@@ -128,7 +130,7 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 	double dens = maxDeviation / (right - left);
 	struct CalcRequest rq;
 	struct ChildAnswer ans;
-	struct SegmentList segList = initList(left, right, nChildren);
+	struct SegmentList segList = initList(left, right);
 	struct UnstudiedSegment* seg;
 	double I = 0;
 	
@@ -137,18 +139,18 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 	while (!isEmpty(segList))
 	{
 		for (int i = 0; i < nChildren; i++)
-		if (!(con[i].closed) && con[i].waiting && (seg = getSeg(segList, -1)) != NULL)
-		{
-			makeRequest(seg, &rq, i, dens);
-			write(con[i].wr, &rq, sizeof(rq));
-			if (errno != 0)
+			if (!(con[i].closed) && con[i].waiting && (seg = getSeg(segList, -1)) != NULL)
 			{
-				fprintf(stderr, "Lost connection with child %d: %s (%d)\n", i, strerror(errno), errno);
-				errno = 0;
-				con[i].closed = true;
+				makeRequest(seg, &rq, i, dens);
+				write(con[i].wr, &rq, sizeof(rq));
+				if (errno != 0)
+				{
+					fprintf(stderr, "Lost connection with child %d: %s (%d)\n", i, strerror(errno), errno);
+					errno = 0;
+					con[i].closed = true;
+				}
+				con[i].waiting = false;
 			}
-			con[i].waiting = false;
-		}
 		
 		int closed = true;
 		for (int i = 0; i < nChildren; i++)
@@ -204,8 +206,8 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 	{
 		close(con[i].rd);
 		close(con[i].wr);
-		free(con);
 	}
+	free(con);
 
 	return I;
 }
@@ -218,7 +220,7 @@ void childCalcSums(int rd, int wr)
 	while (read(rd, &rq, sizeof(rq)))
 	{
 		gettimeofday(&ans.received, NULL);
-		calcSums(func, rq.left, rq.right, &(ans.S), &(ans.eps), rq.nSegments, rq.dens);
+		calcSums(func, rq.left, rq.right, &(ans.S), &(ans.eps), rq.dens);
 		gettimeofday(&ans.sentBack, NULL);
 
 		write(wr, &ans, sizeof(ans));
@@ -226,32 +228,43 @@ void childCalcSums(int rd, int wr)
 	}
 }
 
-
-void calcSums(double (*func)(double x), double left, double right, double* I, double* eps, int nSegments, double dens)
+void calcSums(double (*func)(double x), double left, double right, double* I, double* eps, double dens)
 {
-	double fleft = func(left), fright = func(right);
-	double f1, f2 = 0; 
-	double x;
-
+	int nSegments = 0x100000;
+	int nSubSegments = 0x10;
+	
 	double DI = 0;
 	double epsCur = 0;
-	double maxEps = dens * nSegments;
+	double maxEps = dens * nSegments * nSubSegments;
 
-	for (int i = 1; i <= nSegments; i++)
+	for (int n = 0; n < nSegments; n++)
 	{
-		f1 = f2;
-		x = left + i * (right - left) / nSegments;
-		f2 = func(x) - fleft - i * (fright - fleft) / nSegments; 
+		double l = left +  n      * (right - left) / nSegments;
+		double r = left + (n + 1) * (right - left) / nSegments;
 
-		DI += (f1 + f2) / 2;
-		epsCur += fabs(f1 - f2);
+		double dI = 0;
+		double fleft = func(l), fright = func(r);
+		double f1, f2 = 0; 
+		double x;
+	
+		for (int i = 1; i <= nSubSegments; i++)
+		{
+			f1 = f2;
+			x = l + i * (r - l) / nSubSegments;
+			f2 = func(x) - fleft - i * (fright - fleft) / nSubSegments; 
+	
+			dI += (f1 + f2) / 2;
+			epsCur += fabs(f1 - f2);
+	
+			if (epsCur > maxEps)
+				break;
+		}
 
-		if (epsCur > maxEps)
-			break;
+		DI += dI / nSubSegments + (fright + fleft) / 2;
 	}
 
-	*eps = epsCur / nSegments;
-	*I = DI / nSegments + (fright + fleft) / 2;
+	*eps = epsCur / (nSegments * nSubSegments);
+	*I = DI / nSegments * (right - left);
 }
 
 void createChildren(struct Connection* *conp, int nChildren)
