@@ -14,7 +14,7 @@ struct SegmentList initList(double left, double right)
 	first->right = right;
 	first->next = head;
 	first->prev = head;
-	first->child = -1;
+	first->child = 0;
 
 	head->next = first;
 	head->prev = first;
@@ -72,6 +72,7 @@ struct UnstudiedSegment* findPlace(struct SegmentList list, double len)
 	return p;
 }
 
+/*
 void splitNParts(struct UnstudiedSegment* seg, int n)
 {
 	if (seg == NULL)
@@ -101,6 +102,7 @@ void splitNParts(struct UnstudiedSegment* seg, int n)
 		p = p->next;
 	}
 }
+*/
 
 void split(struct UnstudiedSegment* seg)
 {
@@ -120,8 +122,8 @@ void split(struct UnstudiedSegment* seg)
 	newSeg->right = seg->right;
 	seg->right = center;
 
-	seg->child = -1;
-	newSeg->child = -1;
+	seg->child = 0;
+	newSeg->child = 0;
 
 	seg->next->prev = newSeg;
 	newSeg->prev = seg;
@@ -156,7 +158,6 @@ double removeSeg(struct UnstudiedSegment* seg)
 	if (seg == NULL || seg->next == seg)
 		return 0;
 	
-	//double DI = seg->S * (seg->right - seg->left);
 	double DI = seg->S;
 
 	seg->next->prev = seg->prev;
@@ -193,6 +194,7 @@ struct UnstudiedSegment* getSeg(struct SegmentList list, int child)
 	return NULL;
 }
 
+/*
 struct UnstudiedSegment* getWidestFree(struct SegmentList list)
 {
 	struct UnstudiedSegment* max = NULL;
@@ -209,4 +211,5 @@ struct UnstudiedSegment* getWidestFree(struct SegmentList list)
 
 	return max;
 }
+*/
 

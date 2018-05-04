@@ -12,16 +12,13 @@
 #include <wait.h>
 #include <sched.h>
 #include <math.h>
+#include <fcntl.h>
 
 #include "ui.h"
 #include "list.h"
 #include "general.h"
 
 extern double func(double x);
-
-//#define SEGMENTS_PER_PROCESS 0x1000
-
-double startSegLen;
 
 struct Connection
 {
@@ -44,10 +41,13 @@ int main(int argc, char* argv[])
 {
 	double left, right, maxDeviation;
 	int nChildren;
-		
-	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation);
+	
+//	cpu_set_t set;
+//	CPU_ZERO(&set);
+//	CPU_SET(getpid() % 4, &set);
+//	sched_setaffinity(0, sizeof(set), &set);
 
-	startSegLen = (right - left);
+	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation);
 
 	struct Connection* con;
 	createChildren(&con, nChildren);
@@ -64,65 +64,67 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-int getNSegments(double len, double startLen)
-{
-	int pow = log2(startLen / len);
-
-	if (pow < 8)
-		pow = 8;
-
-	if (pow > 30)
-		pow = 30;
-
-	return 0x1 << pow;	
-}
-
 void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child, double dens)
 {
 	rq->left = seg->left;
 	rq->right = seg->right;
 	rq->dens = dens;
 
-//	rq->nSegments = seg->nSegments;
-//	rq->nSegments = SEGMENTS_PER_PROCESS;
-//	rq->nSegments = getNSegments(rq->right - rq->left, startSegLen);
-
 	gettimeofday(&(rq->sent), NULL);
 
 	seg->child = child;
 }
 
-int handleSegmentData(
+void sendRequest(struct Connection* con, struct UnstudiedSegment* seg, int child, double dens)
+{
+	struct CalcRequest rq;
+	makeRequest(seg, &rq, -(child + 1), dens);
+	write(con[child].wr, &rq, sizeof(rq));
+	if (errno != 0)
+	{
+		con[child].closed = true;
+		fprintf(stderr, "Lost connection with child %d: %s (%d)\n", child, strerror(errno), errno);
+	}
+}
+
+void handleSegmentData(
+	struct Connection* con,
 	struct SegmentList segList, 
 	struct ChildAnswer* ans, 
-	struct CalcRequest* rq,
 	int child,
 	double* I, 
 	double dens)
 {
-	struct UnstudiedSegment* seg = getSeg(segList, child);
+	struct UnstudiedSegment* seg = getSeg(segList, child + 1);
 
 	if (ans->eps < dens)
 	{
 		seg->S = ans->S;
 		*I += removeSeg(seg);
-
-		seg = getSeg(segList, -1);
-		if (seg == NULL)
-			return false;
-
-		makeRequest(seg, rq, child, dens);
-		return true;
 	}
 	else
 	{
 		split(seg);
-//		redoubleViligance(seg);
-
-		seg = getSeg(segList, -1);
-		makeRequest(seg, rq, child, dens);
-		return true;
 	}
+
+	seg = getSeg(segList, -(child + 1));
+	if (seg == NULL)
+	{
+		seg = getSeg(segList, 0);
+		if (seg == NULL)
+		{
+			con[child].waiting = true;
+			return;
+		}
+		
+		sendRequest(con, seg, child, dens);
+	}
+
+	seg->child = child + 1;
+
+	seg = getSeg(segList, 0);
+	if (seg != NULL)
+		sendRequest(con, seg, child, dens);
 }
 
 double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation)
@@ -139,9 +141,9 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 	while (!isEmpty(segList))
 	{
 		for (int i = 0; i < nChildren; i++)
-			if (!(con[i].closed) && con[i].waiting && (seg = getSeg(segList, -1)) != NULL)
+			if (!(con[i].closed) && con[i].waiting && (seg = getSeg(segList, 0)) != NULL)
 			{
-				makeRequest(seg, &rq, i, dens);
+				makeRequest(seg, &rq, i + 1, dens);
 				write(con[i].wr, &rq, sizeof(rq));
 				if (errno != 0)
 				{
@@ -168,7 +170,7 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 
 		FD_ZERO(&rd);
 		for (int i = 0; i < nChildren; i++)
-			if (!(con[i].closed) && !(con[i].waiting))
+			if (!(con[i].closed))
 				FD_SET(con[i].rd, &rd);
 
 		select(nChildren * 2 + 10, &rd, NULL, NULL, NULL);
@@ -184,17 +186,7 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 					continue;
 				}
 
-				if(handleSegmentData(segList, &ans, &rq, i, &I, dens))
-				{
-					write(con[i].wr, &rq, sizeof(rq));
-					if (errno != 0)
-					{
-						con[i].closed = true;
-						fprintf(stderr, "Lost connection with child %d: %s (%d)\n", i, strerror(errno), errno);
-					}
-				}
-				else
-					con[i].waiting = true;
+				handleSegmentData(con, segList, &ans, i, &I, dens);
 			}
 
 		printProgress(segList, left, right, I);
@@ -217,6 +209,11 @@ void childCalcSums(int rd, int wr)
 	struct CalcRequest rq;
 	struct ChildAnswer ans;
 
+//	cpu_set_t set;
+//	CPU_ZERO(&set);
+//	CPU_SET(getpid() % 4, &set);
+//	sched_setaffinity(0, sizeof(set), &set);
+
 	while (read(rd, &rq, sizeof(rq)))
 	{
 		gettimeofday(&ans.received, NULL);
@@ -230,8 +227,8 @@ void childCalcSums(int rd, int wr)
 
 void calcSums(double (*func)(double x), double left, double right, double* I, double* eps, double dens)
 {
-	int nSegments = 0x100000;
-	int nSubSegments = 0x10;
+	const int nSegments = 0x10000;
+	const int nSubSegments = 0x10;
 	
 	double DI = 0;
 	double epsCur = 0;

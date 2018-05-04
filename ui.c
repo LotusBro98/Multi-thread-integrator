@@ -49,6 +49,11 @@ void exitErrorMsg(char* description)
 
 void printAnswer(double left, double right, double maxDeviation, double I)
 {
+	fprintf(stderr, "\033M");
+	fflush(stderr);
+	for (int i = 0; i < 128; i++)
+		fprintf(stderr, " ");
+	
 	fprintf(stderr,
 		"\n"\
 		"%7.3f\n"\
@@ -92,10 +97,10 @@ void printProgress(struct SegmentList segList, double left, double right, double
 		firstTime = false;
 	else
 	{
-//		fprintf(stderr, "\033M");
+		fprintf(stderr, "\033M");
 //		for (int i = 0; i < nChildren + 3; i++)
 //			fprintf(stderr, "\033M");
-//		fflush(stdout);
+		fflush(stdout);
 	}
 
 	
