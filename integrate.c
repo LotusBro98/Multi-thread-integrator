@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/sysinfo.h>
 #include <signal.h>
 #include <sys/select.h>
 #include <wait.h>
@@ -18,7 +19,10 @@
 #include "list.h"
 #include "general.h"
 
-extern double func(double x);
+inline double f(double x)
+{
+	return 4 * x * x * x;
+}
 
 struct Connection
 {
@@ -30,9 +34,10 @@ struct Connection
 
 
 void createChildren(struct Connection* *con, int nChildren);
+void destroyChildren(struct Connection* con, int nChildren);
 
-void calcSums(double (*func)(double x), double left, double right, double* s, double* S, double dens);
-void childCalcSums(int rd, int wr);
+void calcSums(double left, double right, double* s, double* S);
+void childCalcSums(int rd, int wr, int child);
 
 double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation);
 
@@ -41,11 +46,6 @@ int main(int argc, char* argv[])
 {
 	double left, right, maxDeviation;
 	int nChildren;
-	
-//	cpu_set_t set;
-//	CPU_ZERO(&set);
-//	CPU_SET(getpid() % 4, &set);
-//	sched_setaffinity(0, sizeof(set), &set);
 
 	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation);
 
@@ -58,8 +58,7 @@ int main(int argc, char* argv[])
 	else
 		fprintf(stderr, "An error occured while integrating the function. Try relaunching the program.\n");
 
-	for (int i = 0; i < nChildren; i++)
-		wait(NULL);
+	destroyChildren(con, nChildren);
 
 	return 0;
 }
@@ -135,7 +134,6 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 	struct SegmentList segList = initList(left, right);
 	struct UnstudiedSegment* seg;
 	double I = 0;
-	
 	fd_set rd;
 
 	while (!isEmpty(segList))
@@ -194,30 +192,38 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 
 	destroyList(segList);
 
-	for (int i = 0; i < nChildren; i++)
-	{
-		close(con[i].rd);
-		close(con[i].wr);
-	}
-	free(con);
-
 	return I;
 }
 
-void childCalcSums(int rd, int wr)
+void attachChildToCPU(int child)
+{
+	int nCPUs = get_nprocs_conf();
+	int threadsPerCore = 2;
+
+	int cpu = (child / threadsPerCore + child * threadsPerCore) % nCPUs;
+
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	sched_setaffinity(0, sizeof(set), &set);
+	if (errno != 0)
+	{
+		fprintf(stderr, "Failed to attach child %d to CPU %d: %s (%d)\n", child, cpu, strerror(errno), errno);
+		errno = 0;
+	}
+}
+
+void childCalcSums(int rd, int wr, int child)
 {
 	struct CalcRequest rq;
 	struct ChildAnswer ans;
 
-//	cpu_set_t set;
-//	CPU_ZERO(&set);
-//	CPU_SET(getpid() % 4, &set);
-//	sched_setaffinity(0, sizeof(set), &set);
+	attachChildToCPU(child);
 
 	while (read(rd, &rq, sizeof(rq)))
 	{
 		gettimeofday(&ans.received, NULL);
-		calcSums(func, rq.left, rq.right, &(ans.S), &(ans.eps), rq.dens);
+		calcSums(rq.left, rq.right, &(ans.S), &(ans.eps));
 		gettimeofday(&ans.sentBack, NULL);
 
 		write(wr, &ans, sizeof(ans));
@@ -225,42 +231,66 @@ void childCalcSums(int rd, int wr)
 	}
 }
 
-void calcSums(double (*func)(double x), double left, double right, double* I, double* eps, double dens)
+void calcSums(double left, double right, double* I, double* eps)
 {
-	const int nSegments = 0x10000;
-	const int nSubSegments = 0x10;
+	const int nSegments = 0x1000;
+	const int nSubSegments = 0x100;
 	
 	double DI = 0;
 	double epsCur = 0;
-	double maxEps = dens * nSegments * nSubSegments;
 
-	for (int n = 0; n < nSegments; n++)
+	for (register int n = 0; n < nSegments; n++)
 	{
 		double l = left +  n      * (right - left) / nSegments;
 		double r = left + (n + 1) * (right - left) / nSegments;
 
-		double dI = 0;
-		double fleft = func(l), fright = func(r);
-		double f1, f2 = 0; 
-		double x;
+		register double dI = 0;
+		register double dEps = 0;
+		double fleft = f(l), fright = f(r);
+		register double f1, f2 = 0; 
+		register double x;
 	
-		for (int i = 1; i <= nSubSegments; i++)
+		/*
+		for (register int i = 1; i <= nSubSegments; i++)
 		{
 			f1 = f2;
 			x = l + i * (r - l) / nSubSegments;
-			f2 = func(x) - fleft - i * (fright - fleft) / nSubSegments; 
+			f2 = f(x) - fleft - i * (fright - fleft) / nSubSegments; 
 	
 			dI += (f1 + f2) / 2;
-			epsCur += fabs(f1 - f2);
-	
-			if (epsCur > maxEps)
-				break;
+			dEps += f1 > f2 ? f1 - f2 : f2 - f1;
+		}
+		*/
+
+		double dt = 1.0 / nSubSegments;
+		for (register double t = dt; t <= 1; t += dt)
+		{
+			f1 = f2;
+
+			x = r;
+			x -= l;
+			x *= t;
+			x += l;
+
+			f2 = fleft;
+			f2 -= fright;
+			f2 *= t;
+			f2 -= fleft;
+			f2 += f(x);
+
+			dI += f1;
+			dI += f2;
+
+			dEps += f1 > f2 ? f1 - f2 : f2 - f1;
 		}
 
+		dI /= 2;
+
 		DI += dI / nSubSegments + (fright + fleft) / 2;
+		epsCur += dEps / nSubSegments;
 	}
 
-	*eps = epsCur / (nSegments * nSubSegments);
+	*eps = epsCur / (nSegments);
 	*I = DI / nSegments * (right - left);
 }
 
@@ -290,13 +320,14 @@ void createChildren(struct Connection* *conp, int nChildren)
 
 		if (fork() == 0)
 		{
+			int child = i;
 			for (; i >= 0; i--) {
 				close(con[i].rd);
 				close(con[i].wr);
 			}
 			free(con);
 
-			childCalcSums(childPipes[0], childPipes[1]);
+			childCalcSums(childPipes[0], childPipes[1], child);
 			exit(EXIT_SUCCESS);
 		}
 		
@@ -310,5 +341,16 @@ void createChildren(struct Connection* *conp, int nChildren)
 	}
 }
 
-
+void destroyChildren(struct Connection* con, int nChildren)
+{
+	for (int i = 0; i < nChildren; i++)
+	{
+		close(con[i].rd);
+		close(con[i].wr);
+	}
+	free(con);
+	
+	for (int i = 0; i < nChildren; i++)
+		wait(NULL);
+}
 

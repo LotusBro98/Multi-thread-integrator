@@ -181,10 +181,10 @@ void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildr
 {
 	if (argc == 1)
 		exitErrorMsg(
-"Usage: ./integrate <from> <to> [nChildren] [maxDeviation]\n\n\
+"\n Usage: ./integrate <from> <to> [nChildren] [maxDeviation]\n\n"/*\
 Calculates definite integral of function 'func', specified in 'libfunction.so'.\n\
 'libfunction.so' is compiled from 'function.c'. To change the function, edit 'function.c', then run 'make'.\n\
-All parameters except <nChildren> are of type double.\n"
+All parameters except <nChildren> are of type double.\n"*/
 		);
 	else if (argc < 3 || argc > 6)
 		exitErrorMsg("Wrong format. Type './integrate' for help.\n");

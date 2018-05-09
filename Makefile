@@ -1,6 +1,6 @@
 CC=gcc
-CFLAGS=-W -Wall -std=c99
-LDFLAGS=-L. -Wl,-rpath,. -lfunction -lm
+CFLAGS=-W -Wall -std=c99 -Os
+LDFLAGS=-L. -Wl,-rpath,. -lfunction -lm -lpthread
 
 all: libfunction.so integrate
 
