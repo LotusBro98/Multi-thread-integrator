@@ -4,10 +4,11 @@ LDFLAGS=-lm
 
 all: integrate
 
-integrate: integrate.c list.c ui.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+SOURCES=integrate.c list.c ui.c cpuconf.c
+integrate: $(SOURCES)
+	$(CC) $(CFLAGS) $(SOURCES) -o $@ $(LDFLAGS)
 
 clean:
 	rm -rf integrate
 
-integrate: list.h ui.h general.h
+integrate: list.h ui.h general.h cpuconf.h

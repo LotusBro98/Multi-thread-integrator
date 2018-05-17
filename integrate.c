@@ -18,8 +18,8 @@
 #include "ui.h"
 #include "list.h"
 #include "general.h"
+#include "cpuconf.h"
 
-//#include "parse.c"
 
 #define BEST_FINENESS 1e-12
 
@@ -218,10 +218,8 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 
 void attachChildToCPU(int child)
 {
-	int nCPUs = get_nprocs_conf();
-	int threadsPerCore = 2;
-
-	int cpu = (child / threadsPerCore + child * threadsPerCore) % nCPUs;
+	int cpu = getCPUForChild(child);
+	destroyCPUData();
 
 	cpu_set_t set;
 	CPU_ZERO(&set);
@@ -334,6 +332,8 @@ void createChildren(struct Connection* *conp, int nChildren)
 	int childPipes[2];
 	int pipefd[2];
 	int code;
+
+	initCPUData();
 
 	*conp = malloc(sizeof(struct Connection) * nChildren);
 	if (conp == NULL)
