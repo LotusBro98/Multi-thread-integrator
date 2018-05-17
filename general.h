@@ -3,6 +3,13 @@
 
 #include <sys/time.h>
 
+enum ErrorCode {
+	ERR_NO_ERROR,
+	ERR_BEST_FINENESS_REACHED,
+	ERR_CHILD_DISCONNECTED,
+	ERR_OTHER
+};
+
 struct CalcRequest
 {
 	double left;
@@ -20,6 +27,8 @@ struct ChildAnswer
 	struct timeval sent;
 	struct timeval received;
 	struct timeval sentBack;
+
+	enum ErrorCode error;	
 };
 
 #define true 1

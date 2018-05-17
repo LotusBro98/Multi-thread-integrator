@@ -215,5 +215,24 @@ All parameters except <nChildren> are of type double.\n"*/
 		else *maxDeviation = 0.000001;
 }
 
-
-
+void explainError(enum ErrorCode error)
+{
+	switch (error)
+	{
+		case ERR_NO_ERROR:
+			fprintf(stderr, "Success.\n");
+			break;
+		case ERR_BEST_FINENESS_REACHED:
+			fprintf(stderr, 
+"\n\nBest possible fineness for type double has been reached. \
+Further calculations will lead to accuracy loss or, possibly, to a deadlock. \
+Please, try running the program again with bigger <maxDeviation>.\n\n");
+			break;
+		case ERR_OTHER:
+			fprintf(stderr, "An error occured while integrating the function. Try relaunching the program.\n");
+			break;
+		case ERR_CHILD_DISCONNECTED:
+			fprintf(stderr, "Lost connection with one of calculating processes. Relaunching the program may help.\n");
+			break;
+	}
+}

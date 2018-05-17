@@ -19,6 +19,12 @@
 #include "list.h"
 #include "general.h"
 
+//#include "parse.c"
+
+#define BEST_FINENESS 1e-12
+
+enum requestOrder { RQ_FIRST, RQ_LAST };
+
 inline double f(double x)
 {
 	return 4 * x * x * x;
@@ -36,34 +42,35 @@ struct Connection
 void createChildren(struct Connection* *con, int nChildren);
 void destroyChildren(struct Connection* con, int nChildren);
 
-void calcSums(double left, double right, double* s, double* S);
+void calcSums(double left, double right, double* I, double* eps, enum ErrorCode* error);
 void childCalcSums(int rd, int wr, int child);
 
-double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation);
+double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation, enum ErrorCode* error);
 
 
 int main(int argc, char* argv[])
 {
 	double left, right, maxDeviation;
 	int nChildren;
+	enum ErrorCode error;
 
 	parseArgs(argc, argv, &left, &right, &nChildren, &maxDeviation);
 
 	struct Connection* con;
 	createChildren(&con, nChildren);
 
-	double I = parentIntegrate(con, nChildren, left, right, maxDeviation);
-	if (errno == 0)
+	double I = parentIntegrate(con, nChildren, left, right, maxDeviation, &error);
+	if (error == ERR_NO_ERROR)
 		printAnswer(left, right, maxDeviation, I);
 	else
-		fprintf(stderr, "An error occured while integrating the function. Try relaunching the program.\n");
+		explainError(error);
 
 	destroyChildren(con, nChildren);
 
 	return 0;
 }
 
-void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child, double dens)
+void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child, enum requestOrder order, double dens)
 {
 	rq->left = seg->left;
 	rq->right = seg->right;
@@ -71,28 +78,50 @@ void makeRequest(struct UnstudiedSegment* seg, struct CalcRequest* rq, int child
 
 	gettimeofday(&(rq->sent), NULL);
 
-	seg->child = child;
+	if (order == RQ_FIRST)
+		seg->child = child + 1;
+	else
+		seg->child = -(child + 1);
 }
 
-void sendRequest(struct Connection* con, struct UnstudiedSegment* seg, int child, double dens)
+void closeChild(struct Connection* con, struct SegmentList segList, int child)
+{
+	struct UnstudiedSegment* seg;
+
+	seg = getSeg(segList, child + 1);
+	if (seg != NULL)
+		seg->child = 0;
+
+	getSeg(segList, -(child + 1))->child = 0;
+	if (seg != NULL)
+		seg->child = 0;
+
+	con[child].closed = true;
+	//fprintf(stderr, "Lost connection with child %d: %s (%d)\n", child, strerror(errno), errno);
+	fprintf(stderr, "Lost connection with child %d\n", child);
+}
+
+void sendRequest
+(struct Connection* con, struct SegmentList segList, struct UnstudiedSegment* seg, 
+int child, enum requestOrder order, double dens, enum ErrorCode* error)
 {
 	struct CalcRequest rq;
-	makeRequest(seg, &rq, -(child + 1), dens);
-	write(con[child].wr, &rq, sizeof(rq));
-	if (errno != 0)
+	int bytesWritten;
+
+	makeRequest(seg, &rq, child, order, dens);
+	bytesWritten = write(con[child].wr, &rq, sizeof(rq));
+	if (errno != 0 || bytesWritten != sizeof(rq))
 	{
-		con[child].closed = true;
-		fprintf(stderr, "Lost connection with child %d: %s (%d)\n", child, strerror(errno), errno);
+		closeChild(con, segList, child);
+		errno = 0;
+		*error = ERR_CHILD_DISCONNECTED;
 	}
+
+	con[child].waiting = false;
 }
 
-void handleSegmentData(
-	struct Connection* con,
-	struct SegmentList segList, 
-	struct ChildAnswer* ans, 
-	int child,
-	double* I, 
-	double dens)
+void handleSegmentData
+(struct Connection* con, struct SegmentList segList, struct ChildAnswer* ans, int child, double* I, double dens, enum ErrorCode* error)
 {
 	struct UnstudiedSegment* seg = getSeg(segList, child + 1);
 
@@ -107,7 +136,9 @@ void handleSegmentData(
 	}
 
 	seg = getSeg(segList, -(child + 1));
-	if (seg == NULL)
+	if (seg != NULL)
+		seg->child = child + 1;
+	else
 	{
 		seg = getSeg(segList, 0);
 		if (seg == NULL)
@@ -116,20 +147,25 @@ void handleSegmentData(
 			return;
 		}
 		
-		sendRequest(con, seg, child, dens);
+		sendRequest(con, segList, seg, child, RQ_FIRST, dens, error);
 	}
-
-	seg->child = child + 1;
 
 	seg = getSeg(segList, 0);
 	if (seg != NULL)
-		sendRequest(con, seg, child, dens);
+		sendRequest(con, segList, seg, child, RQ_LAST, dens, error);
 }
 
-double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation)
+int isClosed(struct Connection* con, int nChildren)
+{
+	for (int i = 0; i < nChildren; i++)
+		if (!con[i].closed)
+			return false;
+	return true;
+}
+
+double parentIntegrate(struct Connection* con, int nChildren, double left, double right, double maxDeviation, enum ErrorCode* error)
 {
 	double dens = maxDeviation / (right - left);
-	struct CalcRequest rq;
 	struct ChildAnswer ans;
 	struct SegmentList segList = initList(left, right);
 	struct UnstudiedSegment* seg;
@@ -140,31 +176,12 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 	{
 		for (int i = 0; i < nChildren; i++)
 			if (!(con[i].closed) && con[i].waiting && (seg = getSeg(segList, 0)) != NULL)
-			{
-				makeRequest(seg, &rq, i + 1, dens);
-				write(con[i].wr, &rq, sizeof(rq));
-				if (errno != 0)
-				{
-					fprintf(stderr, "Lost connection with child %d: %s (%d)\n", i, strerror(errno), errno);
-					errno = 0;
-					con[i].closed = true;
-				}
-				con[i].waiting = false;
-			}
+				sendRequest(con, segList, seg, i, RQ_FIRST, dens, error);
 		
-		int closed = true;
-		for (int i = 0; i < nChildren; i++)
-			if (!(con[i].closed))
-			{
-				closed = false;
-				break;
-			}
+		if (isClosed(con, nChildren))
+			*error = ERR_OTHER;
 
-		if (closed)
-		{
-			errno = EFAULT;
-			break;
-		}
+		if (*error != ERR_NO_ERROR)	break;
 
 		FD_ZERO(&rd);
 		for (int i = 0; i < nChildren; i++)
@@ -176,17 +193,21 @@ double parentIntegrate(struct Connection* con, int nChildren, double left, doubl
 		for (int i = 0; i < nChildren; i++)
 			if (FD_ISSET(con[i].rd, &rd))
 			{
-				if (read(con[i].rd, &ans, sizeof(ans)) == 0)
+				if (read(con[i].rd, &ans, sizeof(ans)) == 0 || errno != 0 || ans.error != ERR_NO_ERROR)
 				{
-					getSeg(segList, i)->child = -1;
-					con[i].closed = true;
-					fprintf(stderr, "Lost connection with child %d.\n", i);
-					continue;
+					closeChild(con, segList, i);
+					if (ans.error == ERR_NO_ERROR)
+						*error = ERR_CHILD_DISCONNECTED;
+					else
+						*error = ans.error;
+					break;
 				}
 
-				handleSegmentData(con, segList, &ans, i, &I, dens);
+				handleSegmentData(con, segList, &ans, i, &I, dens, error);
+				if (*error != ERR_NO_ERROR) break;
 			}
 
+		if (*error != ERR_NO_ERROR) break;
 		printProgress(segList, left, right, I);
 	}
 
@@ -217,25 +238,38 @@ void childCalcSums(int rd, int wr, int child)
 {
 	struct CalcRequest rq;
 	struct ChildAnswer ans;
-
+	int bytesWritten;
+	int bytesRead;
+	
 	attachChildToCPU(child);
 
-	while (read(rd, &rq, sizeof(rq)))
+	while ((bytesRead = read(rd, &rq, sizeof(rq))))
 	{
+		if (bytesRead != sizeof(rq))
+			break;
+
 		gettimeofday(&ans.received, NULL);
-		calcSums(rq.left, rq.right, &(ans.S), &(ans.eps));
+		calcSums(rq.left, rq.right, &(ans.S), &(ans.eps), &(ans.error));
 		gettimeofday(&ans.sentBack, NULL);
 
-		write(wr, &ans, sizeof(ans));
+		bytesWritten = write(wr, &ans, sizeof(ans));
 		gettimeofday(&ans.sent, NULL);
+		if (errno != 0 || bytesWritten != sizeof(ans))
+			break;
 	}
 }
 
-void calcSums(double left, double right, double* I, double* eps)
+void calcSums(double left, double right, double* I, double* eps, enum ErrorCode* error)
 {
 	const int nSegments = 0x1000;
 	const int nSubSegments = 0x100;
 	
+	if ((right - left) / nSegments / nSubSegments < BEST_FINENESS)
+	{
+		*error = ERR_BEST_FINENESS_REACHED;
+		return;
+	}
+
 	double DI = 0;
 	double epsCur = 0;
 
@@ -292,12 +326,14 @@ void calcSums(double left, double right, double* I, double* eps)
 
 	*eps = epsCur / (nSegments);
 	*I = DI / nSegments * (right - left);
+	*error = ERR_NO_ERROR;
 }
 
 void createChildren(struct Connection* *conp, int nChildren)
 {
 	int childPipes[2];
 	int pipefd[2];
+	int code;
 
 	*conp = malloc(sizeof(struct Connection) * nChildren);
 	if (conp == NULL)
@@ -307,16 +343,22 @@ void createChildren(struct Connection* *conp, int nChildren)
 
 	for (int i = 0; i < nChildren; i++)
 	{
-		pipe(pipefd);
+		code = pipe(pipefd);
 		con[i].wr = pipefd[1];
 		childPipes[0] = pipefd[0];
 		
-		pipe(pipefd);
+		code = pipe(pipefd);
 		con[i].rd = pipefd[0];
 		childPipes[1] = pipefd[1];
 
 		con[i].closed = false;
 		con[i].waiting = true;
+
+		if (code != 0)
+		{
+			fprintf(stderr, "Failed to create pipes.\n");
+			kill(0, SIGTERM);
+		}
 
 		if (fork() == 0)
 		{
@@ -333,8 +375,8 @@ void createChildren(struct Connection* *conp, int nChildren)
 		
 		if (errno != 0)
 		{
+			fprintf(stderr, "Failed to create new child process.\n");
 			kill(0, SIGTERM);
-			exitErrorMsg("Failed to create new child process.\n");
 		}
 		close(childPipes[0]);
 		close(childPipes[1]);

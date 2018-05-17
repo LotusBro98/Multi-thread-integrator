@@ -19,4 +19,6 @@ void parseArgs(int argc, char* argv[], double* left, double* right, int* nChildr
 
 long getMicros(struct timeval tv);
 
+void explainError(enum ErrorCode error);
+
 #endif
